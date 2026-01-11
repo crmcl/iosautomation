@@ -1,0 +1,24 @@
+# iOS Device Communication
+pymobiledevice3>=4.0.0          # Python library for iOS device communication (no jailbreak needed)
+tidevice>=0.12.0                # Alternative iOS device communication tool
+
+# WebDriverAgent / Appium
+Appium-Python-Client>=3.0.0     # Appium client for WDA communication
+wda>=1.4.0                      # Facebook WDA client (direct HTTP communication)
+
+# OCR and Image Processing
+pytesseract>=0.3.10             # Tesseract OCR wrapper
+easyocr>=1.7.0                  # Deep learning OCR (better for mobile UIs)
+opencv-python>=4.8.0            # Image processing
+Pillow>=10.0.0                  # Image manipulation
+numpy>=1.24.0                   # Numerical operations
+
+# Utilities
+requests>=2.31.0                # HTTP requests
+aiohttp>=3.9.0                  # Async HTTP
+python-dotenv>=1.0.0            # Environment variables
+loguru>=0.7.0                   # Better logging
+
+# Mirror-based automation (NO MAC REQUIRED)
+pyautogui>=0.9.54               # Desktop automation for mirror approach
+pygetwindow>=0.0.9              # Window detection

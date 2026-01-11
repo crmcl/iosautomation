@@ -1,0 +1,145 @@
+name: Build WDA (Free Apple ID - No Certificate)
+
+# This workflow builds WDA for development/testing
+# Works with FREE Apple ID but requires manual trust on device
+# App expires after 7 days (free account limitation)
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id_suffix:
+        description: 'Unique suffix for bundle ID (use your name/username)'
+        required: true
+        default: 'myname'
+
+jobs:
+  build-wda-unsigned:
+    runs-on: macos-14
+    
+    steps:
+      - name: Show Environment
+        run: |
+          echo "macOS Version:"
+          sw_vers
+          echo ""
+          echo "Xcode Version:"
+          xcodebuild -version
+          echo ""
+          echo "Available simulators:"
+          xcrun simctl list devices available | head -20
+          
+      - name: Clone WebDriverAgent
+        run: |
+          git clone https://github.com/appium/WebDriverAgent.git
+          cd WebDriverAgent
+          echo "Cloned WDA version:"
+          git log -1 --oneline
+          
+      - name: Update Bundle Identifiers
+        run: |
+          cd WebDriverAgent
+          
+          SUFFIX="${{ github.event.inputs.bundle_id_suffix }}"
+          
+          # Make bundle IDs unique to avoid conflicts
+          sed -i '' "s/com\.facebook\.WebDriverAgentLib/com.${SUFFIX}.WebDriverAgentLib/g" WebDriverAgent.xcodeproj/project.pbxproj
+          sed -i '' "s/com\.facebook\.WebDriverAgentRunner/com.${SUFFIX}.WebDriverAgentRunner/g" WebDriverAgent.xcodeproj/project.pbxproj
+          sed -i '' "s/com\.facebook\.IntegrationApp/com.${SUFFIX}.IntegrationApp/g" WebDriverAgent.xcodeproj/project.pbxproj
+          
+          echo "✅ Updated bundle IDs with suffix: $SUFFIX"
+          grep -o "com\.${SUFFIX}\.[A-Za-z]*" WebDriverAgent.xcodeproj/project.pbxproj | sort -u
+          
+      - name: Build WDA (Unsigned - for manual signing)
+        run: |
+          cd WebDriverAgent
+          
+          # Build without code signing (you'll sign on your Mac/device)
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath ./build \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            -quiet
+            
+          echo "✅ Build completed"
+          
+      - name: List Build Products
+        run: |
+          cd WebDriverAgent
+          echo "Build products:"
+          find ./build -name "*.app" -type d
+          find ./build -name "*.xctestrun" -type f
+          
+      - name: Create Distribution Package
+        run: |
+          cd WebDriverAgent
+          
+          mkdir -p dist
+          
+          # Copy the xctestrun file (needed for running tests)
+          find ./build -name "*.xctestrun" -exec cp {} dist/ \;
+          
+          # Copy the app bundles
+          APP_PATH=$(find ./build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
+          if [ -n "$APP_PATH" ]; then
+            cp -r "$APP_PATH" dist/
+          fi
+          
+          # Also grab the test bundle
+          TEST_PATH=$(find ./build -name "WebDriverAgentRunner.xctest" -type d | head -1)
+          if [ -n "$TEST_PATH" ]; then
+            cp -r "$TEST_PATH" dist/
+          fi
+          
+          # Create tarball
+          tar -czvf wda-build.tar.gz -C dist .
+          
+          echo "Package contents:"
+          tar -tzvf wda-build.tar.gz
+          
+      - name: Upload WDA Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-Unsigned-${{ github.event.inputs.bundle_id_suffix }}
+          path: WebDriverAgent/wda-build.tar.gz
+          retention-days: 90
+          
+      - name: Upload Xcode Project (for manual signing)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-Project-${{ github.event.inputs.bundle_id_suffix }}
+          path: |
+            WebDriverAgent/WebDriverAgent.xcodeproj/
+            WebDriverAgent/WebDriverAgentLib/
+            WebDriverAgent/WebDriverAgentRunner/
+            WebDriverAgent/PrivateHeaders/
+            WebDriverAgent/Configurations/
+          retention-days: 90
+          
+      - name: Print Instructions
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "  BUILD COMPLETE - NEXT STEPS"
+          echo "=========================================="
+          echo ""
+          echo "Since this is an UNSIGNED build, you need to sign it."
+          echo ""
+          echo "Option 1: Use iOS App Signer (Windows/Mac)"
+          echo "  1. Download iOS App Signer"
+          echo "  2. Download the artifact from this workflow"
+          echo "  3. Sign with your Apple ID"
+          echo ""
+          echo "Option 2: Use AltStore/Sideloadly (Easiest)"
+          echo "  1. Download Sideloadly: https://sideloadly.io/"
+          echo "  2. Download the WebDriverAgent-Project artifact"
+          echo "  3. Build & sideload directly to your device"
+          echo ""
+          echo "Option 3: Use a signing service"
+          echo "  - Various online services can sign IPAs"
+          echo ""
+          echo "Your bundle ID suffix: ${{ github.event.inputs.bundle_id_suffix }}"
+          echo "=========================================="
