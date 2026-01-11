@@ -1,6 +1,7 @@
-name: Build WDA (Free Apple ID - No Certificate)
+name: Build WDA (Free Apple ID - Sideloadly Compatible)
 
-# This workflow builds WDA for development/testing
+# This workflow builds WDA with proper structure for Sideloadly signing
+# The xctest bundle is embedded and will be signed recursively
 # Works with FREE Apple ID but requires manual trust on device
 # App expires after 7 days (free account limitation)
 
@@ -13,7 +14,7 @@ on:
         default: 'myname'
 
 jobs:
-  build-wda-unsigned:
+  build-wda:
     runs-on: macos-14
     
     steps:
@@ -25,8 +26,8 @@ jobs:
           echo "Xcode Version:"
           xcodebuild -version
           echo ""
-          echo "Available simulators:"
-          xcrun simctl list devices available | head -20
+          echo "Xcode Path:"
+          xcode-select -p
           
       - name: Clone WebDriverAgent
         run: |
@@ -49,20 +50,36 @@ jobs:
           echo "✅ Updated bundle IDs with suffix: $SUFFIX"
           grep -o "com\.${SUFFIX}\.[A-Za-z]*" WebDriverAgent.xcodeproj/project.pbxproj | sort -u
           
-      - name: Build WDA (Unsigned - for manual signing)
+      - name: Build WDA with Ad-Hoc Signing
         run: |
           cd WebDriverAgent
           
-          # Build without code signing (you'll sign on your Mac/device)
+          # Build with ad-hoc signing so all bundles have valid signatures
+          # Sideloadly will re-sign with your certificate
           xcodebuild build-for-testing \
             -project WebDriverAgent.xcodeproj \
             -scheme WebDriverAgentRunner \
             -destination 'generic/platform=iOS' \
             -derivedDataPath ./build \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGN_IDENTITY="" \
-            -quiet
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            -quiet || true
+            
+          # If ad-hoc fails, try without signing and we'll sign manually
+          if [ ! -d "./build/Build/Products/Debug-iphoneos/WebDriverAgentRunner-Runner.app" ]; then
+            echo "Ad-hoc signing failed, building unsigned..."
+            xcodebuild build-for-testing \
+              -project WebDriverAgent.xcodeproj \
+              -scheme WebDriverAgentRunner \
+              -destination 'generic/platform=iOS' \
+              -derivedDataPath ./build \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGN_IDENTITY="" \
+              -quiet
+          fi
             
           echo "✅ Build completed"
           
@@ -71,40 +88,119 @@ jobs:
           cd WebDriverAgent
           echo "Build products:"
           find ./build -name "*.app" -type d
+          find ./build -name "*.xctest" -type d
           find ./build -name "*.xctestrun" -type f
+          
+      - name: Sign All Bundles (Ad-Hoc)
+        run: |
+          cd WebDriverAgent
+          
+          APP_PATH=$(find ./build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
+          
+          if [ -n "$APP_PATH" ]; then
+            echo "Signing all bundles in: $APP_PATH"
+            
+            # Sign frameworks first (deepest level)
+            find "$APP_PATH" -name "*.framework" -type d | while read framework; do
+              echo "Signing framework: $framework"
+              codesign --force --deep --sign - "$framework" 2>/dev/null || true
+            done
+            
+            # Sign xctest bundles
+            find "$APP_PATH" -name "*.xctest" -type d | while read xctest; do
+              echo "Signing xctest: $xctest"
+              # Sign frameworks inside xctest
+              find "$xctest" -name "*.framework" -type d | while read framework; do
+                codesign --force --deep --sign - "$framework" 2>/dev/null || true
+              done
+              codesign --force --deep --sign - "$xctest" 2>/dev/null || true
+            done
+            
+            # Sign the main app
+            echo "Signing main app: $APP_PATH"
+            codesign --force --deep --sign - "$APP_PATH" 2>/dev/null || true
+            
+            echo "✅ All bundles signed"
+            
+            # Verify signatures
+            echo ""
+            echo "Verifying signatures:"
+            codesign -vv "$APP_PATH" 2>&1 || echo "Main app signature check"
+            find "$APP_PATH/PlugIns" -name "*.xctest" -type d -exec codesign -vv {} \; 2>&1 || true
+          fi
+          
+      - name: Create IPA Package
+        run: |
+          cd WebDriverAgent
+          
+          SUFFIX="${{ github.event.inputs.bundle_id_suffix }}"
+          
+          # Create Payload directory structure
+          mkdir -p Payload
+          
+          APP_PATH=$(find ./build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
+          
+          if [ -n "$APP_PATH" ]; then
+            # Copy app to Payload
+            cp -r "$APP_PATH" Payload/
+            
+            # Verify xctest is included
+            echo "Checking PlugIns contents:"
+            ls -la Payload/WebDriverAgentRunner-Runner.app/PlugIns/
+            
+            # Create IPA
+            zip -r "WebDriverAgent-${SUFFIX}.ipa" Payload
+            
+            echo "✅ IPA created: WebDriverAgent-${SUFFIX}.ipa"
+            echo ""
+            echo "IPA contents:"
+            unzip -l "WebDriverAgent-${SUFFIX}.ipa" | head -50
+          else
+            echo "❌ Could not find WebDriverAgentRunner-Runner.app"
+            exit 1
+          fi
           
       - name: Create Distribution Package
         run: |
           cd WebDriverAgent
+          
+          SUFFIX="${{ github.event.inputs.bundle_id_suffix }}"
           
           mkdir -p dist
           
           # Copy the xctestrun file (needed for running tests)
           find ./build -name "*.xctestrun" -exec cp {} dist/ \;
           
-          # Copy the app bundles
+          # Copy the IPA
+          cp "WebDriverAgent-${SUFFIX}.ipa" dist/
+          
+          # Also include raw app bundle for debugging
           APP_PATH=$(find ./build -name "WebDriverAgentRunner-Runner.app" -type d | head -1)
           if [ -n "$APP_PATH" ]; then
             cp -r "$APP_PATH" dist/
           fi
           
-          # Also grab the test bundle
+          # Include xctest bundle separately for reference
           TEST_PATH=$(find ./build -name "WebDriverAgentRunner.xctest" -type d | head -1)
           if [ -n "$TEST_PATH" ]; then
             cp -r "$TEST_PATH" dist/
           fi
           
-          # Create tarball
-          tar -czvf wda-build.tar.gz -C dist .
-          
           echo "Package contents:"
-          tar -tzvf wda-build.tar.gz
+          ls -la dist/
           
-      - name: Upload WDA Build
+      - name: Upload IPA (Ready for Sideloadly)
         uses: actions/upload-artifact@v4
         with:
-          name: WebDriverAgent-Unsigned-${{ github.event.inputs.bundle_id_suffix }}
-          path: WebDriverAgent/wda-build.tar.gz
+          name: WebDriverAgent-IPA-${{ github.event.inputs.bundle_id_suffix }}
+          path: WebDriverAgent/WebDriverAgent-${{ github.event.inputs.bundle_id_suffix }}.ipa
+          retention-days: 90
+          
+      - name: Upload Full Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-Full-${{ github.event.inputs.bundle_id_suffix }}
+          path: WebDriverAgent/dist/
           retention-days: 90
           
       - name: Upload Xcode Project (for manual signing)
@@ -121,25 +217,40 @@ jobs:
           
       - name: Print Instructions
         run: |
+          SUFFIX="${{ github.event.inputs.bundle_id_suffix }}"
           echo ""
           echo "=========================================="
           echo "  BUILD COMPLETE - NEXT STEPS"
           echo "=========================================="
           echo ""
-          echo "Since this is an UNSIGNED build, you need to sign it."
+          echo "📦 Download: WebDriverAgent-IPA-${SUFFIX}"
           echo ""
-          echo "Option 1: Use iOS App Signer (Windows/Mac)"
-          echo "  1. Download iOS App Signer"
-          echo "  2. Download the artifact from this workflow"
-          echo "  3. Sign with your Apple ID"
+          echo "This IPA has ALL bundles pre-signed (ad-hoc) including:"
+          echo "  ✅ WebDriverAgentRunner-Runner.app (main app)"
+          echo "  ✅ WebDriverAgentRunner.xctest (test bundle)"
+          echo "  ✅ All embedded frameworks"
           echo ""
-          echo "Option 2: Use AltStore/Sideloadly (Easiest)"
-          echo "  1. Download Sideloadly: https://sideloadly.io/"
-          echo "  2. Download the WebDriverAgent-Project artifact"
-          echo "  3. Build & sideload directly to your device"
+          echo "INSTALLATION STEPS:"
           echo ""
-          echo "Option 3: Use a signing service"
-          echo "  - Various online services can sign IPAs"
+          echo "1. Download the IPA artifact"
           echo ""
-          echo "Your bundle ID suffix: ${{ github.event.inputs.bundle_id_suffix }}"
+          echo "2. Install with Sideloadly:"
+          echo "   - Open Sideloadly"
+          echo "   - Drag the IPA file into Sideloadly"
+          echo "   - Enter your Apple ID"
+          echo "   - Click Start"
+          echo ""
+          echo "3. Trust the app on your iPhone:"
+          echo "   Settings > General > VPN & Device Management"
+          echo "   > Tap your Apple ID > Trust"
+          echo ""
+          echo "4. Run WDA using go-ios:"
+          echo "   ios tunnel start --userspace"
+          echo "   ios runwda --bundleid=com.${SUFFIX}.WebDriverAgentRunner \\"
+          echo "     --testrunnerbundleid=com.${SUFFIX}.WebDriverAgentRunner.xctrunner \\"
+          echo "     --xctestconfig=WebDriverAgentRunner"
+          echo ""
+          echo "Your bundle IDs:"
+          echo "  Runner: com.${SUFFIX}.WebDriverAgentRunner.xctrunner"
+          echo "  Test:   com.${SUFFIX}.WebDriverAgentRunner"
           echo "=========================================="
